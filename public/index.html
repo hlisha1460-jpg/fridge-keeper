@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="冰箱管家">
+  <title>冰箱管家</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- 落地页 -->
+  <div id="landing" class="screen active">
+    <div class="landing-hero">
+      <div class="logo-circle">🧊</div>
+      <h1>冰箱管家</h1>
+      <p class="tagline">食材不浪费，每一口都新鲜</p>
+    </div>
+    <div class="landing-card">
+      <button class="btn-primary" onclick="showCreateForm()">创建新冰箱</button>
+      <div class="divider"><span>或</span></div>
+      <div class="join-group">
+        <input type="text" id="joinCode" placeholder="输入房间码" maxlength="16" autocomplete="off">
+        <button class="btn-secondary" onclick="joinRoom()">加入</button>
+      </div>
+    </div>
+    <div id="createForm" class="create-form hidden">
+      <input type="text" id="createName" placeholder="冰箱名称（如：家的冰箱）" maxlength="20">
+      <input type="text" id="createUser" placeholder="你的昵称" maxlength="10">
+      <button class="btn-primary" onclick="createRoom()">确认创建</button>
+    </div>
+    <div id="joinUserWrap" class="create-form hidden">
+      <input type="text" id="joinUser" placeholder="你的昵称" maxlength="10">
+      <button class="btn-primary" onclick="confirmJoin()">确认加入</button>
+    </div>
+    <p class="footnote">创建冰箱 → 分享房间码 → 一家人一起管理</p>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="main" class="screen">
+    <div class="main-inner">
+    <header class="app-header">
+      <div class="header-left">
+        <button class="icon-btn" onclick="showShare()" title="分享">📤</button>
+      </div>
+      <div class="header-center">
+        <div class="room-name" id="roomName">冰箱管家</div>
+        <div class="room-code" id="roomCodeDisplay">—</div>
+      </div>
+      <div class="header-right">
+        <button class="icon-btn" onclick="showMembers()" title="成员">👥</button>
+      </div>
+    </header>
+
+    <div class="summary-bar" id="summaryBar">
+      <div class="summary-item" onclick="filterSummary('all')" id="summaryTotal"><span class="summary-num" id="totalCount">0</span><span class="summary-label">总食材</span></div>
+      <div class="summary-item" onclick="filterSummary('urgent')" id="summaryUrgent"><span class="summary-num urgent" id="urgentCount">0</span><span class="summary-label">即将过期</span></div>
+      <div class="summary-item" onclick="filterSummary('expired')" id="summaryExpired"><span class="summary-num expired" id="expiredCount">0</span><span class="summary-label">已过期</span></div>
+    </div>
+
+    <div class="category-tabs" id="categoryTabs">
+      <button class="cat-tab active" data-cat="all" onclick="switchCategory('all')">全部</button>
+      <button class="cat-tab" data-cat="vegetable" onclick="switchCategory('vegetable')">🥬 蔬菜</button>
+      <button class="cat-tab" data-cat="cooked" onclick="switchCategory('cooked')">🍱 熟食</button>
+      <button class="cat-tab" data-cat="baby_food" onclick="switchCategory('baby_food')">👶 宝宝食材</button>
+      <button class="cat-tab" data-cat="raw_meat" onclick="switchCategory('raw_meat')">🥩 生肉</button>
+      <button class="cat-tab" data-cat="bakery" onclick="switchCategory('bakery')">🥐 面包点心</button>
+      <button class="cat-tab" data-cat="leftovers" onclick="switchCategory('leftovers')">🍚 剩饭</button>
+      <button class="cat-tab" data-cat="other" onclick="switchCategory('other')">📦 其他</button>
+    </div>
+
+    <div class="food-list" id="foodList">
+      <div class="empty-state">
+        <div class="empty-icon">🧊</div>
+        <p>冰箱空空如也</p>
+        <p class="empty-hint">点击下方 + 添加食材</p>
+      </div>
+    </div>
+
+    </div><!-- .main-inner -->
+
+    <div id="syncStatus" class="sync-status syncing">
+      <span id="syncLabel">🔄 连接中...</span>
+    </div>
+    <button class="fab" onclick="openAddModal()">+</button>
+  </div>
+
+  <!-- 添加/编辑弹窗 -->
+  <div id="itemModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-header">
+        <span id="modalTitle">添加食材</span>
+        <button class="close-btn" onclick="closeModal('itemModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="preset-section" id="presetSection">
+          <div class="preset-label">快速选择（点击即填）</div>
+          <div class="preset-grid" id="presetGrid"></div>
+        </div>
+        <div class="form-row">
+          <label>食材名称</label>
+          <input type="text" id="itemName" placeholder="或从上方的预设中选择" maxlength="20">
+        </div>
+        <div class="form-row">
+          <label>分类</label>
+          <div class="category-picker" id="categoryPicker">
+            <button class="cat-pick selected" data-cat="vegetable">🥬 蔬菜</button>
+            <button class="cat-pick" data-cat="cooked">🍱 熟食</button>
+            <button class="cat-pick" data-cat="baby_food">👶 宝宝食材</button>
+            <button class="cat-pick" data-cat="raw_meat">🥩 生肉</button>
+            <button class="cat-pick" data-cat="bakery">🥐 面包点心</button>
+            <button class="cat-pick" data-cat="leftovers">🍚 剩饭</button>
+            <button class="cat-pick" data-cat="other">📦 其他</button>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>保质期到期日</label>
+          <input type="date" id="itemExpiry">
+        </div>
+        <div class="form-row form-row-inline">
+          <div class="form-col"><label>数量</label><input type="number" id="itemQty" value="1" min="1" max="999"></div>
+          <div class="form-col"><label>单位</label><input type="text" id="itemUnit" placeholder="份" maxlength="5" value="份"></div>
+        </div>
+        <div class="form-row">
+          <label>备注（选填）</label>
+          <input type="text" id="itemNote" placeholder="如：放冷藏室上层" maxlength="50">
+        </div>
+        <div class="quick-expiry">
+          <span class="quick-label">快速设置：</span>
+          <button class="quick-btn" data-days="1">明天</button>
+          <button class="quick-btn" data-days="3">3天</button>
+          <button class="quick-btn" data-days="5">5天</button>
+          <button class="quick-btn" data-days="7">1周</button>
+          <button class="quick-btn" data-days="14">2周</button>
+          <button class="quick-btn" data-days="30">1个月</button>
+          <button class="quick-btn" data-days="90">3个月</button>
+          <button class="quick-btn" data-days="180">6个月</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-danger hidden" id="deleteBtn" onclick="deleteCurrentItem()">删除</button>
+        <button class="btn-cancel" onclick="closeModal('itemModal')">取消</button>
+        <button class="btn-primary" onclick="saveItem()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 分享弹窗 -->
+  <div id="shareModal" class="modal-overlay">
+    <div class="modal modal-sm">
+      <div class="modal-header"><span>邀请家人</span><button class="close-btn" onclick="closeModal('shareModal')">&times;</button></div>
+      <div class="modal-body share-body">
+        <p class="share-hint">把房间码分享给家人，打开这个链接后输入码即可加入</p>
+        <div class="big-code" id="bigCode">———</div>
+        <button class="btn-primary" onclick="copyCode()">复制房间码</button>
+        <button class="btn-secondary" onclick="leaveRoom()" style="margin-top:12px;">退出冰箱</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 成员弹窗 -->
+  <div id="memberModal" class="modal-overlay">
+    <div class="modal modal-sm">
+      <div class="modal-header"><span>冰箱成员</span><button class="close-btn" onclick="closeModal('memberModal')">&times;</button></div>
+      <div class="modal-body" id="memberList"><p class="share-hint">暂无成员</p></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

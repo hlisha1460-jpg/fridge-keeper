@@ -1,0 +1,12 @@
+{
+  "name": "fridge-keeper",
+  "version": "3.0.0",
+  "description": "冰箱管家 - 家庭食材管理 · 多人实时同步",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
