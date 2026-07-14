@@ -2,6 +2,7 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { Pool } = require("pg");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,7 +21,31 @@ app.use((_req, res, next) => {
 });
 
 // ── Data Layer ────────────────────────────────────────────────────────
-function loadDB() {
+let pool = null;
+
+async function initDB() {
+  if (!process.env.DATABASE_URL) {
+    console.log("使用本地 JSON 文件存储");
+    return;
+  }
+  pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS fridge_data (
+        key TEXT PRIMARY KEY,
+        value JSONB NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    console.log("已连接 PostgreSQL");
+  } catch (e) {
+    console.error("PostgreSQL 初始化失败，降级到文件存储:", e.message);
+    pool = null;
+  }
+}
+
+function loadDBFile() {
   try {
     if (fs.existsSync(DB_PATH)) {
       const raw = fs.readFileSync(DB_PATH, "utf-8");
@@ -33,13 +58,38 @@ function loadDB() {
   return { rooms: {}, members: {} };
 }
 
-function saveDB(db) {
+function saveDBFile(db) {
   const dir = path.dirname(DB_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  // Atomic write: write to temp then rename
   const tmp = DB_PATH + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(db, null, 2), "utf-8");
   fs.renameSync(tmp, DB_PATH);
+}
+
+async function loadDB() {
+  if (!pool) return loadDBFile();
+  try {
+    const { rows } = await pool.query("SELECT value FROM fridge_data WHERE key = $1", ["db"]);
+    if (rows.length === 0) return { rooms: {}, members: {} };
+    const data = rows[0].value;
+    return { rooms: data.rooms || {}, members: data.members || {} };
+  } catch (e) {
+    console.error("PG load error:", e.message);
+    return loadDBFile();
+  }
+}
+
+async function saveDB(db) {
+  if (!pool) return saveDBFile(db);
+  try {
+    await pool.query(
+      "INSERT INTO fridge_data (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()",
+      ["db", JSON.stringify(db)]
+    );
+  } catch (e) {
+    console.error("PG save error:", e.message);
+    saveDBFile(db);
+  }
 }
 
 function genId(len = 10) {
@@ -57,18 +107,18 @@ function genRoomCode() {
 
 // ── API: Health ───────────────────────────────────────────────────────
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, time: Date.now() });
+  res.json({ ok: true, time: Date.now(), storage: pool ? "postgresql" : "file" });
 });
 
 // ── API: Rooms ────────────────────────────────────────────────────────
 // Create room
-app.post("/api/rooms", (req, res) => {
+app.post("/api/rooms", async (req, res) => {
   const { name, userName } = req.body;
   if (!name || !userName) {
     return res.status(400).json({ error: "Missing name or userName" });
   }
 
-  const db = loadDB();
+  const db = await loadDB();
   const roomCode = genRoomCode();
   const memberId = genId(8);
 
@@ -82,7 +132,7 @@ app.post("/api/rooms", (req, res) => {
 
   db.members[memberId] = { name: String(userName).slice(0, 20), rooms: [roomCode] };
 
-  saveDB(db);
+  await saveDB(db);
 
   res.json({
     ok: true,
@@ -93,14 +143,14 @@ app.post("/api/rooms", (req, res) => {
 });
 
 // Join room
-app.post("/api/rooms/:code/join", (req, res) => {
+app.post("/api/rooms/:code/join", async (req, res) => {
   const { code } = req.params;
   const { userName } = req.body;
   if (!userName) {
     return res.status(400).json({ error: "Missing userName" });
   }
 
-  const db = loadDB();
+  const db = await loadDB();
   const room = db.rooms[code];
   if (!room) {
     return res.status(404).json({ error: "房间不存在" });
@@ -123,7 +173,7 @@ app.post("/api/rooms/:code/join", (req, res) => {
     db.members[memberId].rooms.push(code);
   }
 
-  saveDB(db);
+  await saveDB(db);
 
   res.json({
     ok: true,
@@ -133,9 +183,9 @@ app.post("/api/rooms/:code/join", (req, res) => {
 });
 
 // Get room (full state for sync)
-app.get("/api/rooms/:code", (req, res) => {
+app.get("/api/rooms/:code", async (req, res) => {
   const { code } = req.params;
-  const db = loadDB();
+  const db = await loadDB();
   const room = db.rooms[code];
   if (!room) {
     return res.status(404).json({ error: "房间不存在" });
@@ -149,9 +199,9 @@ app.get("/api/rooms/:code", (req, res) => {
 
 // ── API: Items ────────────────────────────────────────────────────────
 // Add item
-app.post("/api/rooms/:code/items", (req, res) => {
+app.post("/api/rooms/:code/items", async (req, res) => {
   const { code } = req.params;
-  const db = loadDB();
+  const db = await loadDB();
   const room = db.rooms[code];
   if (!room) return res.status(404).json({ error: "房间不存在" });
 
@@ -171,15 +221,15 @@ app.post("/api/rooms/:code/items", (req, res) => {
   };
 
   room.items[itemId] = item;
-  saveDB(db);
+  await saveDB(db);
 
   res.json({ ok: true, item });
 });
 
 // Update item
-app.put("/api/rooms/:code/items/:itemId", (req, res) => {
+app.put("/api/rooms/:code/items/:itemId", async (req, res) => {
   const { code, itemId } = req.params;
-  const db = loadDB();
+  const db = await loadDB();
   const room = db.rooms[code];
   if (!room) return res.status(404).json({ error: "房间不存在" });
   if (!room.items[itemId]) return res.status(404).json({ error: "食材不存在" });
@@ -197,20 +247,20 @@ app.put("/api/rooms/:code/items/:itemId", (req, res) => {
   };
 
   room.items[itemId] = updated;
-  saveDB(db);
+  await saveDB(db);
 
   res.json({ ok: true, item: updated });
 });
 
 // Delete item
-app.delete("/api/rooms/:code/items/:itemId", (req, res) => {
+app.delete("/api/rooms/:code/items/:itemId", async (req, res) => {
   const { code, itemId } = req.params;
-  const db = loadDB();
+  const db = await loadDB();
   const room = db.rooms[code];
   if (!room) return res.status(404).json({ error: "房间不存在" });
 
   delete room.items[itemId];
-  saveDB(db);
+  await saveDB(db);
 
   res.json({ ok: true });
 });
@@ -234,6 +284,8 @@ app.get(/^\/(?!api\/).*/, (_req, res) => {
 });
 
 // ── Start ─────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log("冰箱管家后端已启动 → http://localhost:" + PORT);
+initDB().then(() => {
+  app.listen(PORT, () => {
+    console.log("冰箱管家后端已启动 → http://localhost:" + PORT);
+  });
 });
