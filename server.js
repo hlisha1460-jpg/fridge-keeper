@@ -128,7 +128,14 @@ function sanitizeRoom(room) {
 
 // ── API: Health ───────────────────────────────────────────────────────
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, time: Date.now(), storage: storageMode });
+  res.json({
+    ok: true,
+    time: Date.now(),
+    version: "v4-rest",
+    storage: storageMode,
+    supabase_url_set: !!SUPABASE_URL,
+    supabase_key_set: !!SUPABASE_KEY,
+  });
 });
 
 // ── API: Rooms ────────────────────────────────────────────────────────
