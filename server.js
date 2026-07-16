@@ -1,3 +1,4 @@
+// ── 冰箱管家 v3 ── PostgreSQL 持久化 ─────────────────────────────────
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
@@ -28,7 +29,10 @@ async function initDB() {
     console.log("使用本地 JSON 文件存储");
     return;
   }
-  pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS fridge_data (
