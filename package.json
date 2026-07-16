@@ -1,13 +1,13 @@
 {
   "name": "fridge-keeper",
-  "version": "3.0.0",
-  "description": "冰箱管家 - 家庭食材管理 · 多人实时同步",
+  "version": "3.0.1",
+  "description": "\u51b0\u7bb1\u7ba1\u5bb6 - \u5bb6\u5ead\u98df\u6750\u7ba1\u7406 \u00b7 \u591a\u4eba\u5b9e\u65f6\u540c\u6b65 \u00b7 PostgreSQL \u6301\u4e45\u5316",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "pg": "^8.13.1"
+    "pg": "^8.13.0"
   }
 }
