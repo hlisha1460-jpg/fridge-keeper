@@ -625,32 +625,124 @@ document.addEventListener("click", function(e) {
 
 // ── Init ───────────────────────────────────────────────────────
 (function init() {
-  // Detect server first
-  detectServer().then(function(hasServer) {
-    if (hasServer && loadLocal() && state.roomCode) {
-      // Server mode: restore from local + sync
-      enterMain(); updateSyncStatus("syncing");
-      apiCall("/rooms/" + state.roomCode).then(function(d) {
-        state.roomName = d.room.name; state.members = d.room.members; state.rawItems = {};
-        (d.room.items||[]).forEach(function(i) { state.rawItems[i.id] = i; });
-        state._synced = true; state._renderHash = ""; persistLocal(); renderAll(); updateSyncStatus("online"); startPolling();
-      }).catch(function() { updateSyncStatus("offline"); startPolling(); });
-    } else if (!hasServer) {
-      // Static mode: try hash, then local
-      var shared = loadFromHash();
-      if (shared) {
-        state.roomCode = shared.roomCode; state.roomName = shared.roomName;
-        state.members = shared.members; state.rawItems = {};
-        shared.items.forEach(function(i) { state.rawItems[i.id] = i; });
-        state.memberId = genId(8);
-        var wrap = document.getElementById("joinUserWrap"); wrap.classList.remove("hidden");
-        wrap._joinCode = shared.roomCode; wrap._shared = shared;
-        document.getElementById("joinCode").value = shared.roomCode;
-        document.getElementById("joinUser").focus();
-        showToast("发现共享冰箱！请输入昵称加入");
-      } else if (loadLocal() && state.roomCode) {
-        enterMain();
-      }
+  var loadingEl = document.getElementById("loadingOverlay");
+  var loadingMsg = document.getElementById("loadingMsg");
+  var loadingRetry = document.getElementById("loadingRetry");
+  var initDone = false;
+
+  function hideLoading() {
+    if (!initDone) {
+      initDone = true;
+      loadingEl.classList.add("hidden");
+      setTimeout(function() {
+        if (loadingEl.classList.contains("hidden")) loadingEl.style.display = "none";
+      }, 400);
     }
-  });
+  }
+
+  function showRetry(msg) {
+    loadingMsg.textContent = msg || "连接超时，请重试";
+    loadingRetry.classList.add("show");
+  }
+
+  // Detect server with timeout (use GET for reliability)
+  function detectServerWithTimeout(ms) {
+    ms = ms || 8000;
+    var controller = new AbortController();
+    var timeoutId = setTimeout(function() { controller.abort(); }, ms);
+    return fetch("/api/health", { method: "GET", signal: controller.signal })
+      .then(function(r) {
+        clearTimeout(timeoutId);
+        HAS_SERVER = r.ok;
+        if (HAS_SERVER) updateSyncStatus("syncing");
+        else updateSyncStatus("offline");
+        return HAS_SERVER;
+      })
+      .catch(function() {
+        clearTimeout(timeoutId);
+        HAS_SERVER = false;
+        updateSyncStatus("offline");
+        return false;
+      });
+  }
+
+  function doAutoLogin() {
+    loadingMsg.textContent = "正在连接...";
+
+    detectServerWithTimeout(8000).then(function(hasServer) {
+      if (hasServer && loadLocal() && state.roomCode) {
+        // Server mode: auto-login
+        loadingMsg.textContent = "已找到你的冰箱，正在进入...";
+        enterMain(); updateSyncStatus("syncing");
+        hideLoading();
+
+        apiCall("/rooms/" + state.roomCode).then(function(d) {
+          state.roomName = d.room.name; state.members = d.room.members; state.rawItems = {};
+          (d.room.items || []).forEach(function(i) { state.rawItems[i.id] = i; });
+          state._synced = true; state._renderHash = ""; persistLocal(); renderAll(); updateSyncStatus("online"); startPolling();
+        }).catch(function() {
+          // Server sync failed, but local data is still shown
+          updateSyncStatus("offline"); startPolling();
+        });
+      } else if (hasServer && !(loadLocal() && state.roomCode)) {
+        // Server is up but no local data — show landing
+        hideLoading();
+      } else if (!hasServer) {
+        // No server: try hash, then local
+        var shared = loadFromHash();
+        if (shared) {
+          // Shared via hash link — stay on landing, show join prompt
+          state.roomCode = shared.roomCode; state.roomName = shared.roomName;
+          state.members = shared.members; state.rawItems = {};
+          shared.items.forEach(function(i) { state.rawItems[i.id] = i; });
+          state.memberId = genId(8);
+          hideLoading();
+          var wrap = document.getElementById("joinUserWrap");
+          wrap.classList.remove("hidden");
+          wrap._joinCode = shared.roomCode; wrap._shared = shared;
+          document.getElementById("joinCode").value = shared.roomCode;
+          document.getElementById("joinUser").focus();
+          showToast("发现共享冰箱！请输入昵称加入");
+        } else if (loadLocal() && state.roomCode) {
+          // Local data only — enter main
+          loadingMsg.textContent = "已找到本地数据...";
+          enterMain(); hideLoading();
+        } else {
+          // Nothing — show landing
+          hideLoading();
+        }
+
+        // Retry server connection in background
+        setTimeout(function() {
+          detectServerWithTimeout(5000).then(function(ok) {
+            if (ok && state.roomCode) {
+              updateSyncStatus("syncing");
+              apiCall("/rooms/" + state.roomCode).then(function(d) {
+                state.roomName = d.room.name; state.members = d.room.members; state.rawItems = {};
+                (d.room.items || []).forEach(function(i) { state.rawItems[i.id] = i; });
+                state._synced = true; state._renderHash = ""; persistLocal(); renderAll(); updateSyncStatus("online"); startPolling();
+              }).catch(function() { updateSyncStatus("offline"); if (!state._pollTimer) startPolling(); });
+            }
+          });
+        }, 2000);
+      }
+    }).catch(function() {
+      // Total failure — try local
+      if (loadLocal() && state.roomCode) {
+        loadingMsg.textContent = "服务器连接失败，使用本地数据...";
+        enterMain(); hideLoading();
+      } else {
+        showRetry("连接失败，请检查网络后重试");
+      }
+    });
+  }
+
+  // Expose retry for button
+  window.retryAutoLogin = function() {
+    loadingRetry.classList.remove("show");
+    loadingMsg.textContent = "重新连接中...";
+    doAutoLogin();
+  };
+
+  doAutoLogin();
 })();

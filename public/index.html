@@ -11,6 +11,13 @@
 </head>
 <body>
 
+  <!-- 自动登录加载层 -->
+  <div id="loadingOverlay" class="loading-overlay">
+    <div class="loading-spinner"></div>
+    <p class="loading-text" id="loadingMsg">正在连接...</p>
+    <button class="loading-retry" id="loadingRetry" onclick="retryAutoLogin()">🔄 重试</button>
+  </div>
+
   <!-- 落地页 -->
   <div id="landing" class="screen active">
     <div class="landing-hero">
