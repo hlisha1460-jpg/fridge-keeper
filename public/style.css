@@ -590,12 +590,15 @@ button {
   color: #fff;
   font-size: 28px;
   font-weight: 300;
-  display: flex;
+  display: none;
   align-items: center;
   justify-content: center;
   box-shadow: 0 6px 20px rgba(76, 175, 80, 0.4);
   z-index: 40;
   transition: all 0.2s;
+}
+#main.active .fab {
+  display: flex;
 }
 .fab:active {
   transform: scale(0.9);
