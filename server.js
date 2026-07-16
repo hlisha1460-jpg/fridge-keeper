@@ -23,28 +23,43 @@ app.use((_req, res, next) => {
 
 // ── Data Layer ────────────────────────────────────────────────────────
 let pool = null;
+let _diag = { db_url_set: false, db_url_prefix: "", error: "", tried_ssl: false, pg_available: false };
 
 async function initDB() {
-  if (!process.env.DATABASE_URL) {
-    console.log("使用本地 JSON 文件存储");
+  // Check if pg module is available
+  try {
+    require.resolve("pg");
+    _diag.pg_available = true;
+  } catch (_) {
+    _diag.pg_available = false;
+  }
+
+  const dbUrl = process.env.DATABASE_URL;
+  _diag.db_url_set = !!dbUrl;
+  if (dbUrl) {
+    _diag.db_url_prefix = dbUrl.substring(0, 40) + "...";
+  }
+
+  if (!dbUrl) {
+    console.log("⚠ DATABASE_URL 未设置，使用文件存储");
+    _diag.error = "DATABASE_URL 未设置";
     return;
   }
+
+  // Try with SSL (Supabase requires it)
   pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
+    connectionString: dbUrl,
     ssl: { rejectUnauthorized: false }
   });
+  _diag.tried_ssl = true;
   try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS fridge_data (
-        key TEXT PRIMARY KEY,
-        value JSONB NOT NULL,
-        created_at TIMESTAMPTZ DEFAULT NOW(),
-        updated_at TIMESTAMPTZ DEFAULT NOW()
-      )
-    `);
-    console.log("已连接 PostgreSQL");
+    await pool.query(`CREATE TABLE IF NOT EXISTS fridge_data (key TEXT PRIMARY KEY, value JSONB NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())`);
+    console.log("✅ 已连接 PostgreSQL");
+    _diag.error = "";
   } catch (e) {
-    console.error("PostgreSQL 初始化失败，降级到文件存储:", e.message);
+    console.error("PostgreSQL 初始化失败:", e.message);
+    _diag.error = e.message;
+    try { pool.end(); } catch (_) {}
     pool = null;
   }
 }
@@ -112,6 +127,20 @@ function genRoomCode() {
 // ── API: Health ───────────────────────────────────────────────────────
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, time: Date.now(), storage: pool ? "postgresql" : "file" });
+});
+
+// Diagnostic: see what's wrong with PostgreSQL connection
+app.get("/api/diag", (_req, res) => {
+  res.json({
+    storage: pool ? "postgresql" : "file",
+    pg_available: _diag.pg_available,
+    db_url_set: _diag.db_url_set,
+    db_url_prefix: _diag.db_url_prefix,
+    tried_ssl: _diag.tried_ssl,
+    error: _diag.error,
+    node_version: process.version,
+    env_keys: Object.keys(process.env).filter(k => k.includes("DB") || k.includes("PG") || k.includes("DATABASE")),
+  });
 });
 
 // ── API: Rooms ────────────────────────────────────────────────────────
