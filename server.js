@@ -49,7 +49,8 @@ async function initDB() {
   // Try with SSL (Supabase requires it)
   pool = new Pool({
     connectionString: dbUrl,
-    ssl: { rejectUnauthorized: false }
+    ssl: { rejectUnauthorized: false },
+    family: 4, // 强制 IPv4（Railway 不支持 IPv6）
   });
   _diag.tried_ssl = true;
   try {
