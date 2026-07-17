@@ -91,7 +91,19 @@
     <div id="syncStatus" class="sync-status syncing">
       <span id="syncLabel">🔄 连接中...</span>
     </div>
-    <button class="fab" onclick="openAddModal()">+</button>
+    <button class="fab voice-fab" onclick="startVoiceInput()" title="语音">🎤</button>
+    <button class="fab" onclick="openAddModal()" title="添加">+</button>
+  </div>
+
+  <!-- 语音识别浮层 -->
+  <div id="voiceOverlay" class="voice-overlay">
+    <div class="voice-card">
+      <div class="voice-pulse"></div>
+      <div class="voice-icon-big">🎤</div>
+      <p class="voice-hint" id="voiceHint">正在聆听...<br>说"放入西红柿"或"取出鸡蛋"</p>
+      <p class="voice-result" id="voiceResult"></p>
+      <button class="voice-cancel" onclick="stopVoiceInput()">取消</button>
+    </div>
   </div>
 
   <!-- 添加/编辑弹窗 -->

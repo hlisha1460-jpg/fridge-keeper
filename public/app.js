@@ -1,7 +1,5 @@
 // ================================================================
-// 冰箱管家 v3 — 双模运行
-// 有后端(Express) → 服务端同步，所有人共享
-// 无后端(静态部署) → localStorage + hash分享
+// 冰箱管家 v5 — 分表存储 · 并发安全 · 自动登录
 // ================================================================
 
 // ── Constants ──────────────────────────────────────────────────
@@ -81,6 +79,8 @@ var state = {
   _summaryFilter: null,
   _pollTimer: null,
   _synced: false,
+  _localChangeTime: 0,   // v5: track local changes to debounce polling
+  _pendingVersions: {},   // v5: track local edit versions for conflict detection
 };
 
 // ── Mode Detection ─────────────────────────────────────────────
@@ -102,7 +102,7 @@ function detectServer() {
     });
 }
 
-// ── API (server mode) ──────────────────────────────────────────
+// ── API ────────────────────────────────────────────────────────
 function apiCall(path, opts) {
   opts = opts || {};
   var fetchOpts = {
@@ -111,21 +111,42 @@ function apiCall(path, opts) {
   };
   if (opts.body) fetchOpts.body = JSON.stringify(opts.body);
   return fetch("/api" + path, fetchOpts).then(function(r) {
-    if (!r.ok) return r.json().then(function(e) { throw new Error(e.error || "服务器错误"); });
+    if (!r.ok) return r.json().then(function(e) { throw e; });
     return r.json();
   });
 }
 
-// ── Hash encoding (static mode) ────────────────────────────────
+// ── Hash encoding (UTF-8 safe, no deprecated escape/unescape) ──
 function packData(data) {
   var json = JSON.stringify(data);
-  return btoa(unescape(encodeURIComponent(json))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+  var utf8 = encodeURIComponent(json);
+  var bin = "";
+  for (var i = 0; i < utf8.length; i++) {
+    var c = utf8[i];
+    if (c === "%") {
+      bin += String.fromCharCode(parseInt(utf8.substr(i + 1, 2), 16));
+      i += 2;
+    } else {
+      bin += c;
+    }
+  }
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
 function unpackData(str) {
   str = str.replace(/-/g, "+").replace(/_/g, "/");
   while (str.length % 4) str += "=";
-  return JSON.parse(decodeURIComponent(escape(atob(str))));
+  var bin = atob(str);
+  var utf8 = "";
+  for (var i = 0; i < bin.length; i++) {
+    var code = bin.charCodeAt(i);
+    if (code > 127) {
+      utf8 += "%" + code.toString(16).toUpperCase();
+    } else {
+      utf8 += bin[i];
+    }
+  }
+  return JSON.parse(decodeURIComponent(utf8));
 }
 
 function buildShareHash() {
@@ -207,7 +228,7 @@ function showToast(msg) {
   el.textContent = msg;
   el.classList.add("show");
   clearTimeout(el._timeout);
-  el._timeout = setTimeout(function() { el.classList.remove("show"); }, 2000);
+  el._timeout = setTimeout(function() { el.classList.remove("show"); }, 2500);
 }
 
 function openModal(id) { document.getElementById(id).classList.add("active"); }
@@ -231,7 +252,7 @@ function loadLocal() {
   } catch(e) { return false; }
 }
 
-// ── Room Ops (dual-mode) ───────────────────────────────────────
+// ── Room Ops ───────────────────────────────────────────────────
 function showCreateForm() {
   document.getElementById("createForm").classList.remove("hidden");
   document.getElementById("createName").focus();
@@ -243,15 +264,13 @@ function createRoom() {
   if (!name || !user) { showToast("请填写冰箱名称和昵称"); return; }
 
   if (HAS_SERVER) {
-    // Server mode
     apiCall("/rooms", { method: "POST", body: { name: name, userName: user } })
       .then(function(d) {
         state.roomCode = d.roomCode; state.memberId = d.memberId; state.userName = user;
         state.roomName = name; state.rawItems = {}; state.members = d.room.members; state._synced = true;
         persistLocal(); enterMain(); startPolling(); showToast("冰箱创建成功！");
-      }).catch(function(e) { showToast("创建失败：" + e.message); });
+      }).catch(function(e) { showToast("创建失败：" + (e.error || e.message)); });
   } else {
-    // Static mode
     state.roomCode = genRoomCode(); state.memberId = genId(8); state.userName = user;
     state.roomName = name; state.rawItems = {}; state.members = [{ id: state.memberId, name: user }];
     state._renderHash = "";
@@ -272,7 +291,6 @@ function joinRoom() {
       })
       .catch(function() { showToast("房间不存在，请检查房间码"); });
   } else {
-    // Static: try hash data, or just create fresh
     var shared = loadFromHash();
     var wrap = document.getElementById("joinUserWrap");
     wrap.classList.remove("hidden"); wrap._joinCode = code; wrap._shared = shared;
@@ -291,9 +309,9 @@ function confirmJoin() {
       .then(function(d) {
         state.roomCode = code; state.memberId = d.memberId; state.userName = user;
         state.roomName = d.room.name; state.members = d.room.members; state.rawItems = {};
-        (d.room.items || []).forEach(function(i) { state.rawItems[i.id] = i; });
+        (d.room.items || []).forEach(function(i) { i.expiryDate = i.expiryDate || i.expiry_date || ""; state.rawItems[i.id] = i; });
         state._synced = true; persistLocal(); enterMain(); startPolling(); showToast("已加入");
-      }).catch(function(e) { showToast("加入失败：" + e.message); });
+      }).catch(function(e) { showToast("加入失败：" + (e.error || e.message)); });
   } else {
     var shared = wrap._shared;
     state.roomCode = code; state.memberId = genId(8); state.userName = user;
@@ -329,38 +347,75 @@ function leaveRoom() {
   if (!confirm("确定退出当前冰箱吗？")) return;
   stopPolling(); closeModal("shareModal");
   state.roomCode = null; state.rawItems = {}; state.members = []; state._renderHash = ""; state._synced = false;
+  state._pendingVersions = {};
   localStorage.removeItem("fridge_v3"); window.location.hash = "";
   document.getElementById("main").classList.remove("active");
   document.getElementById("landing").classList.add("active");
 }
 
-// ── Polling (server mode only) ─────────────────────────────────
+// ── Polling (v5: 15s interval, debounce local changes) ────────
 function startPolling() {
   if (!HAS_SERVER) return;
   stopPolling(); pollOnce();
-  state._pollTimer = setInterval(pollOnce, 3000);
+  state._pollTimer = setInterval(pollOnce, 15000);
 }
 
 function stopPolling() {
   if (state._pollTimer) { clearInterval(state._pollTimer); state._pollTimer = null; }
 }
 
+function markLocalChange() {
+  state._localChangeTime = Date.now();
+}
+
 function pollOnce() {
   if (!state.roomCode || !HAS_SERVER) return;
+  // 如果 3 秒内有本地修改，跳过以等待服务端处理
+  if (Date.now() - state._localChangeTime < 3000) return;
+
   apiCall("/rooms/" + state.roomCode)
     .then(function(d) {
       var hasChanges = false;
+      var remoteItems = {};
       (d.room.items || []).forEach(function(item) {
-        var existing = state.rawItems[item.id];
-        if (!existing || (item.updatedAt && item.updatedAt > (existing._localUpdated || 0))) {
-          state.rawItems[item.id] = item; hasChanges = true;
+        // Normalize field names between v4 and v5
+        item.expiryDate = item.expiryDate || item.expiry_date || "";
+        remoteItems[item.id] = item;
+      });
+
+      // v5: skip items that have a pending local version (being edited)
+      Object.keys(state._pendingVersions).forEach(function(id) {
+        if (remoteItems[id]) {
+          var rv = remoteItems[id].updatedAt;
+          var pv = state._pendingVersions[id];
+          // If server has a newer version, our edit was overwritten — accept server
+          if (rv > pv) {
+            delete state._pendingVersions[id];
+          } else {
+            // Keep our local version, mark as changed
+            delete remoteItems[id];
+          }
         }
       });
-      var remoteIds = {}; (d.room.items || []).forEach(function(i) { remoteIds[i.id] = true; });
-      Object.keys(state.rawItems).forEach(function(id) {
-        if (!remoteIds[id]) { delete state.rawItems[id]; hasChanges = true; }
+
+      // Add/update from remote
+      Object.keys(remoteItems).forEach(function(id) {
+        var existing = state.rawItems[id];
+        var remote = remoteItems[id];
+        if (!existing || !existing.updatedAt || (remote.updatedAt && remote.updatedAt > existing.updatedAt)) {
+          state.rawItems[id] = remote; hasChanges = true;
+        }
       });
-      if (JSON.stringify(d.room.members) !== JSON.stringify(state.members)) { state.members = d.room.members; hasChanges = true; }
+
+      // Remove items no longer on server
+      Object.keys(state.rawItems).forEach(function(id) {
+        if (!remoteItems[id]) { delete state.rawItems[id]; hasChanges = true; }
+      });
+
+      if (d.room.members && JSON.stringify(d.room.members) !== JSON.stringify(state.members)) {
+        state.members = d.room.members; hasChanges = true;
+      }
+
       if (hasChanges) { state._renderHash = ""; renderAll(); persistLocal(); }
       if (!state._synced) { state._synced = true; updateSyncStatus("online"); }
     }).catch(function() { updateSyncStatus("offline"); });
@@ -438,13 +493,11 @@ function renderSummary() {
 }
 
 function filterSummary(type) {
-  // Force re-render regardless of hash
   state._renderHash = "";
   if (type === "all") {
     state._summaryFilter = null; state.currentCategory = "all";
     document.querySelectorAll(".cat-tab").forEach(function(t) { t.classList.toggle("active", t.dataset.cat === "all"); });
   } else if (state._summaryFilter === type) {
-    // Toggle off: show all
     state._summaryFilter = null; state.currentCategory = "all";
     document.querySelectorAll(".cat-tab").forEach(function(t) { t.classList.toggle("active", t.dataset.cat === "all"); });
   } else {
@@ -452,7 +505,6 @@ function filterSummary(type) {
     document.querySelectorAll(".cat-tab").forEach(function(t) { t.classList.toggle("active", t.dataset.cat === "all"); });
   }
   renderAll();
-  // Also update summary visual states directly (belt-and-suspenders)
   updateSummaryActive();
 }
 
@@ -487,7 +539,7 @@ function bindSwipe() {
   });
 }
 
-// ── CRUD (dual-mode) ───────────────────────────────────────────
+// ── CRUD (v5: 版本检查) ────────────────────────────────────────
 function selectCategory(cat) {
   state.selectedCategory = cat;
   document.querySelectorAll(".cat-pick").forEach(function(b) { b.classList.toggle("selected", b.dataset.cat === cat); });
@@ -528,31 +580,77 @@ function saveItem() {
   if (!name) { showToast("请输入食材名称"); return; }
 
   var now = Date.now();
+  var itemData = {
+    name: name, category: state.selectedCategory,
+    expiryDate: document.getElementById("itemExpiry").value,
+    quantity: parseInt(document.getElementById("itemQty").value)||1,
+    unit: document.getElementById("itemUnit").value.trim()||"份",
+    note: document.getElementById("itemNote").value.trim(),
+    addedBy: state.userName,
+  };
+
   if (state.editingItemId) {
-    // Update
-    var updateData = { name: name, category: state.selectedCategory, expiryDate: document.getElementById("itemExpiry").value, quantity: parseInt(document.getElementById("itemQty").value)||1, unit: document.getElementById("itemUnit").value.trim()||"份", note: document.getElementById("itemNote").value.trim() };
+    // Update — 带版本检查
     if (HAS_SERVER) {
-      apiCall("/rooms/" + state.roomCode + "/items/" + state.editingItemId, { method:"PUT", body: updateData })
-        .then(function(d) { state.rawItems[state.editingItemId] = d.item; state._renderHash=""; persistLocal(); closeModal("itemModal"); renderAll(); showToast("已更新"); })
-        .catch(function(e) { showToast("更新失败：" + e.message); });
+      var existing = state.rawItems[state.editingItemId];
+      var clientVersion = existing ? (existing.updatedAt || 0) : 0;
+      itemData._clientVersion = clientVersion;
+
+      // 标记本地修改
+      state._pendingVersions[state.editingItemId] = now;
+      markLocalChange();
+
+      apiCall("/rooms/" + state.roomCode + "/items/" + state.editingItemId, { method:"PUT", body: itemData })
+        .then(function(d) {
+          state.rawItems[state.editingItemId] = d.item;
+          delete state._pendingVersions[state.editingItemId];
+          state._renderHash=""; persistLocal(); closeModal("itemModal"); renderAll(); showToast("已更新");
+        })
+        .catch(function(e) {
+          delete state._pendingVersions[state.editingItemId];
+          if (e.conflict) {
+            showToast("食材已被他人修改，正在刷新...");
+            // 重新从服务器拉取最新数据
+            pollOnceNow();
+          } else {
+            showToast("更新失败：" + (e.error || e.message));
+          }
+          closeModal("itemModal");
+        });
     } else {
       var existing = state.rawItems[state.editingItemId];
-      state.rawItems[state.editingItemId] = { id: state.editingItemId, name: name, category: state.selectedCategory, expiryDate: updateData.expiryDate, quantity: updateData.quantity, unit: updateData.unit, note: updateData.note, addedBy: existing?existing.addedBy:state.userName, updatedAt: now };
+      state.rawItems[state.editingItemId] = { id: state.editingItemId, name: name, category: state.selectedCategory, expiryDate: itemData.expiryDate, quantity: itemData.quantity, unit: itemData.unit, note: itemData.note, addedBy: existing?existing.addedBy:state.userName, updatedAt: now };
       state._renderHash=""; persistLocal(); closeModal("itemModal"); renderAll(); autoUpdateHash(); showToast("已更新");
     }
   } else {
     // Add
-    var itemData = { name: name, category: state.selectedCategory, expiryDate: document.getElementById("itemExpiry").value, quantity: parseInt(document.getElementById("itemQty").value)||1, unit: document.getElementById("itemUnit").value.trim()||"份", note: document.getElementById("itemNote").value.trim(), addedBy: state.userName };
     if (HAS_SERVER) {
+      markLocalChange();
       apiCall("/rooms/" + state.roomCode + "/items", { method:"POST", body: itemData })
-        .then(function(d) { state.rawItems[d.item.id] = d.item; state._renderHash=""; persistLocal(); closeModal("itemModal"); renderAll(); showToast("已添加"); })
-        .catch(function(e) { showToast("添加失败：" + e.message); });
+        .then(function(d) {
+          state.rawItems[d.item.id] = d.item;
+          state._renderHash=""; persistLocal(); closeModal("itemModal"); renderAll(); showToast("已添加");
+        })
+        .catch(function(e) { showToast("添加失败：" + (e.error || e.message)); });
     } else {
       var id = genId(10);
       state.rawItems[id] = { id: id, name: name, category: state.selectedCategory, expiryDate: itemData.expiryDate, quantity: itemData.quantity, unit: itemData.unit, note: itemData.note, addedBy: state.userName, addedAt: now, updatedAt: now };
       state._renderHash=""; persistLocal(); closeModal("itemModal"); renderAll(); autoUpdateHash(); showToast("已添加");
     }
   }
+}
+
+// v5: 立即拉取最新数据（用于冲突恢复）
+function pollOnceNow() {
+  if (!state.roomCode || !HAS_SERVER) return;
+  state._renderHash = "";
+  apiCall("/rooms/" + state.roomCode)
+    .then(function(d) {
+      state.roomName = d.room.name; state.members = d.room.members; state.rawItems = {};
+      (d.room.items || []).forEach(function(i) { i.expiryDate = i.expiryDate || i.expiry_date || ""; state.rawItems[i.id] = i; });
+      state._synced = true; persistLocal(); renderAll(); updateSyncStatus("online");
+    })
+    .catch(function() { updateSyncStatus("offline"); });
 }
 
 function deleteCurrentItem() {
@@ -563,15 +661,16 @@ function deleteCurrentItem() {
 
 function deleteItem(id) {
   if (HAS_SERVER) {
+    markLocalChange();
     apiCall("/rooms/" + state.roomCode + "/items/" + id, { method:"DELETE" })
       .then(function() { delete state.rawItems[id]; state._renderHash=""; persistLocal(); renderAll(); showToast("已删除"); })
-      .catch(function(e) { showToast("删除失败：" + e.message); });
+      .catch(function(e) { showToast("删除失败：" + (e.error || e.message)); });
   } else {
     delete state.rawItems[id]; state._renderHash=""; persistLocal(); renderAll(); autoUpdateHash(); showToast("已删除");
   }
 }
 
-// ── Auto-update hash (static mode) ─────────────────────────────
+// ── Auto-update hash ───────────────────────────────────────────
 function autoUpdateHash() {
   if (HAS_SERVER) return;
   var hash = buildShareHash();
@@ -586,7 +685,6 @@ function showShare() { document.getElementById("bigCode").textContent = state.ro
 function copyCode() {
   var url = window.location.origin + window.location.pathname;
   if (url.endsWith("/")) url = url.slice(0, -1);
-  // In static mode, append hash with data
   if (!HAS_SERVER) url = url + "#" + buildShareHash();
   if (navigator.clipboard) {
     navigator.clipboard.writeText(url).then(function() {
@@ -605,10 +703,10 @@ function fallbackCopy(text) {
 
 function showMembers() {
   var seen = {}, unique = [];
-  (state.members||[]).forEach(function(m) { var k=(m.name||"").trim(); if(!k||seen[k])return; seen[k]=true; unique.push(m); });
+  (state.members||[]).forEach(function(m) { var k=m.id||m.name||""; if(!k||seen[k])return; seen[k]=true; unique.push(m); });
   document.getElementById("memberList").innerHTML = unique.map(function(m) {
     var init = (m.name||"?").charAt(0).toUpperCase(), isMe = m.id===state.memberId;
-    return '<div class="member-row"><div class="member-avatar">'+escapeHtml(init)+'</div><div><div class="member-name">'+(m.name||"?").substring(0,20)+(isMe?" (我)":"")+'</div></div></div>';
+    return '<div class="member-row"><div class="member-avatar">'+escapeHtml(init)+'</div><div><div class="member-name">'+escapeHtml((m.name||"?").substring(0,20))+(isMe?" (我)":"")+'</div></div></div>';
   }).join("");
   openModal("memberModal");
 }
@@ -623,7 +721,261 @@ document.addEventListener("click", function(e) {
   if (e.target.classList.contains("modal-overlay")) e.target.classList.remove("active");
 });
 
-// ── Init ───────────────────────────────────────────────────────
+// ── Voice Input (语音放入/取出) ───────────────────────────────
+var _voiceRec = null;
+var _voiceActive = false;
+
+function startVoiceInput() {
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    showToast("当前浏览器不支持语音识别");
+    // 降级：打开添加弹窗
+    openAddModal();
+    return;
+  }
+
+  if (_voiceActive) {
+    stopVoiceInput();
+    return;
+  }
+
+  _voiceRec = new SR();
+  _voiceRec.lang = "zh-CN";
+  _voiceRec.continuous = false;
+  _voiceRec.interimResults = true;
+  _voiceActive = true;
+
+  var overlay = document.getElementById("voiceOverlay");
+  var hint = document.getElementById("voiceHint");
+  var result = document.getElementById("voiceResult");
+  var fab = document.querySelector(".voice-fab");
+
+  overlay.classList.add("active");
+  fab.classList.add("listening");
+  hint.innerHTML = "正在聆听...<br>说\"放入西红柿\"或\"取出鸡蛋\"";
+  result.textContent = "";
+
+  var finalTranscript = "";
+
+  _voiceRec.onresult = function(event) {
+    var interim = "";
+    for (var i = event.resultIndex; i < event.results.length; i++) {
+      if (event.results[i].isFinal) {
+        finalTranscript += event.results[i][0].transcript;
+      } else {
+        interim += event.results[i][0].transcript;
+      }
+    }
+    if (interim) result.textContent = interim;
+    if (finalTranscript) {
+      result.textContent = finalTranscript;
+      parseVoiceCommand(finalTranscript.trim());
+    }
+  };
+
+  _voiceRec.onerror = function(event) {
+    hint.textContent = "语音识别出错：" + (event.error || "未知错误");
+    if (event.error === "not-allowed") {
+      hint.innerHTML = "请允许浏览器使用麦克风<br>在微信中可能需要用系统浏览器打开";
+    }
+    setTimeout(stopVoiceInput, 2000);
+  };
+
+  _voiceRec.onend = function() {
+    if (_voiceActive && !finalTranscript) {
+      hint.textContent = "没有听到声音，请再试一次";
+      setTimeout(stopVoiceInput, 1500);
+    } else if (_voiceActive) {
+      setTimeout(stopVoiceInput, 800);
+    }
+  };
+
+  try {
+    _voiceRec.start();
+  } catch(e) {
+    showToast("启动语音失败");
+    stopVoiceInput();
+  }
+}
+
+function stopVoiceInput() {
+  _voiceActive = false;
+  if (_voiceRec) {
+    try { _voiceRec.stop(); } catch(e) {}
+    _voiceRec = null;
+  }
+  var overlay = document.getElementById("voiceOverlay");
+  var fab = document.querySelector(".voice-fab");
+  overlay.classList.remove("active");
+  fab.classList.remove("listening");
+}
+
+// 关键词匹配 — 放入/取出
+var VOICE_PUT_KEYWORDS = ["放入", "放进", "放冰箱", "放入冰箱", "加", "添加", "买了", "买"];
+var VOICE_TAKE_KEYWORDS = ["取出", "拿出", "拿走", "取", "吃了", "吃掉", "吃", "用掉", "用完", "扔了", "扔掉", "丢", "删除", "删"];
+
+function parseVoiceCommand(text) {
+  var putKeyword = null;
+  var takeKeyword = null;
+
+  // 找放入关键词
+  for (var i = 0; i < VOICE_PUT_KEYWORDS.length; i++) {
+    var idx = text.indexOf(VOICE_PUT_KEYWORDS[i]);
+    if (idx >= 0) {
+      if (!putKeyword || idx < text.indexOf(putKeyword)) {
+        putKeyword = VOICE_PUT_KEYWORDS[i];
+      }
+    }
+  }
+
+  // 找取出关键词
+  for (var j = 0; j < VOICE_TAKE_KEYWORDS.length; j++) {
+    var idx2 = text.indexOf(VOICE_TAKE_KEYWORDS[j]);
+    if (idx2 >= 0) {
+      if (!takeKeyword || idx2 < text.indexOf(takeKeyword)) {
+        takeKeyword = VOICE_TAKE_KEYWORDS[j];
+      }
+    }
+  }
+
+  if (putKeyword && (!takeKeyword || text.indexOf(putKeyword) < text.indexOf(takeKeyword))) {
+    // 放入模式
+    var foodName = extractFoodName(text, putKeyword);
+    if (foodName) {
+      voiceAddItem(foodName);
+    } else {
+      showToast("没听清食材名称，请再说一次");
+    }
+  } else if (takeKeyword) {
+    // 取出模式
+    var foodName2 = extractFoodName(text, takeKeyword);
+    if (foodName2) {
+      voiceRemoveItem(foodName2);
+    } else {
+      showToast("没听清食材名称，请再说一次");
+    }
+  } else {
+    // 没有关键词，尝试直接匹配食材
+    var matched = matchPresetByName(text);
+    if (matched) {
+      voiceAddItem(matched.name, matched.category);
+    } else {
+      showToast("请说\"放入\"或\"取出\"加食材名称");
+    }
+  }
+}
+
+function extractFoodName(text, keyword) {
+  var idx = text.indexOf(keyword);
+  if (idx < 0) return null;
+  var after = text.substring(idx + keyword.length).trim();
+  // 去掉常见语气词
+  after = after.replace(/^(了|一些|一点|个|几个|两|三|四|五|六|七|八|九|十)+/g, "").trim();
+  // 去掉末尾标点
+  after = after.replace(/[，。！？、\s]+$/g, "").trim();
+  if (!after) return null;
+  return after;
+}
+
+function matchPresetByName(name) {
+  for (var i = 0; i < PRESETS.length; i++) {
+    if (name.indexOf(PRESETS[i].name) >= 0 || PRESETS[i].name.indexOf(name) >= 0) {
+      return PRESETS[i];
+    }
+  }
+  return null;
+}
+
+function autoCategorize(name) {
+  var matched = matchPresetByName(name);
+  if (matched) return matched.category;
+  // 简单关键词匹配
+  var lower = name.toLowerCase();
+  if (/西红柿|黄瓜|胡萝卜|西兰花|生菜|菠菜|青椒|土豆|玉米|蘑菇|茄子|白菜|菜|葱|姜|蒜|豆|瓜/.test(name)) return "vegetable";
+  if (/肉|排|骨|鸡|鸭|鱼|虾|牛|猪|羊/.test(name)) return "raw_meat";
+  if (/面包|蛋糕|吐司|馒头|包|糕|饼干/.test(name)) return "bakery";
+  if (/奶|蛋|芝士|奶酪|酸奶|酱/.test(name)) return "other";
+  if (/饭|面|粥|汤|剩/.test(name)) return "leftovers";
+  if (/泥|粉|糊|辅食|宝宝/.test(name)) return "baby_food";
+  return "other";
+}
+
+function voiceAddItem(name, category) {
+  var cat = category || autoCategorize(name);
+  var now = Date.now();
+  var tm = new Date(); tm.setDate(tm.getDate() + 3);
+
+  var itemData = {
+    name: name, category: cat,
+    expiryDate: tm.toISOString().split("T")[0],
+    quantity: 1, unit: "份",
+    note: "语音添加", addedBy: state.userName,
+  };
+
+  if (HAS_SERVER) {
+    markLocalChange();
+    apiCall("/rooms/" + state.roomCode + "/items", { method: "POST", body: itemData })
+      .then(function(d) {
+        state.rawItems[d.item.id] = d.item;
+        state._renderHash = ""; persistLocal(); renderAll();
+        var catLabel = (CATEGORY_META[cat] || {}).label || "其他";
+        showToast("语音添加: " + name + " (" + catLabel + ")");
+      })
+      .catch(function(e) { showToast("添加失败：" + (e.error || e.message)); });
+  } else {
+    var id = genId(10);
+    state.rawItems[id] = { id: id, name: name, category: cat,
+      expiryDate: itemData.expiryDate, quantity: 1, unit: "份",
+      note: "语音添加", addedBy: state.userName, addedAt: now, updatedAt: now };
+    state._renderHash = ""; persistLocal(); renderAll(); autoUpdateHash();
+    showToast("语音添加: " + name);
+  }
+}
+
+function voiceRemoveItem(name) {
+  // 查找匹配的食材
+  var matched = [];
+  Object.keys(state.rawItems).forEach(function(id) {
+    var item = state.rawItems[id];
+    if (item.name && (item.name.indexOf(name) >= 0 || name.indexOf(item.name) >= 0)) {
+      matched.push(item);
+    }
+  });
+
+  if (matched.length === 0) {
+    showToast("冰箱里没有找到\"" + name + "\"");
+    return;
+  }
+
+  if (matched.length === 1) {
+    // 只有一个匹配，直接删除
+    voiceDoDelete(matched[0].id, matched[0].name);
+  } else {
+    // 多个匹配，全部删除
+    matched.forEach(function(item) {
+      voiceDoDelete(item.id, item.name);
+    });
+  }
+}
+
+function voiceDoDelete(id, name) {
+  if (HAS_SERVER) {
+    markLocalChange();
+    apiCall("/rooms/" + state.roomCode + "/items/" + id, { method: "DELETE" })
+      .then(function() {
+        delete state.rawItems[id];
+        state._renderHash = ""; persistLocal(); renderAll();
+        showToast("语音取出: " + name);
+      })
+      .catch(function(e) { showToast("删除失败：" + (e.error || e.message)); });
+  } else {
+    delete state.rawItems[id];
+    state._renderHash = ""; persistLocal(); renderAll(); autoUpdateHash();
+    showToast("语音取出: " + name);
+  }
+}
+
+
 (function init() {
   var loadingEl = document.getElementById("loadingOverlay");
   var loadingMsg = document.getElementById("loadingMsg");
@@ -645,7 +997,6 @@ document.addEventListener("click", function(e) {
     loadingRetry.classList.add("show");
   }
 
-  // Detect server with timeout (use GET for reliability)
   function detectServerWithTimeout(ms) {
     ms = ms || 8000;
     var controller = new AbortController();
@@ -671,27 +1022,22 @@ document.addEventListener("click", function(e) {
 
     detectServerWithTimeout(8000).then(function(hasServer) {
       if (hasServer && loadLocal() && state.roomCode) {
-        // Server mode: auto-login
         loadingMsg.textContent = "已找到你的冰箱，正在进入...";
         enterMain(); updateSyncStatus("syncing");
         hideLoading();
 
         apiCall("/rooms/" + state.roomCode).then(function(d) {
           state.roomName = d.room.name; state.members = d.room.members; state.rawItems = {};
-          (d.room.items || []).forEach(function(i) { state.rawItems[i.id] = i; });
+          (d.room.items || []).forEach(function(i) { i.expiryDate = i.expiryDate || i.expiry_date || ""; state.rawItems[i.id] = i; });
           state._synced = true; state._renderHash = ""; persistLocal(); renderAll(); updateSyncStatus("online"); startPolling();
         }).catch(function() {
-          // Server sync failed, but local data is still shown
           updateSyncStatus("offline"); startPolling();
         });
       } else if (hasServer && !(loadLocal() && state.roomCode)) {
-        // Server is up but no local data — show landing
         hideLoading();
       } else if (!hasServer) {
-        // No server: try hash, then local
         var shared = loadFromHash();
         if (shared) {
-          // Shared via hash link — stay on landing, show join prompt
           state.roomCode = shared.roomCode; state.roomName = shared.roomName;
           state.members = shared.members; state.rawItems = {};
           shared.items.forEach(function(i) { state.rawItems[i.id] = i; });
@@ -704,22 +1050,20 @@ document.addEventListener("click", function(e) {
           document.getElementById("joinUser").focus();
           showToast("发现共享冰箱！请输入昵称加入");
         } else if (loadLocal() && state.roomCode) {
-          // Local data only — enter main
           loadingMsg.textContent = "已找到本地数据...";
           enterMain(); hideLoading();
         } else {
-          // Nothing — show landing
           hideLoading();
         }
 
-        // Retry server connection in background
+        // 后台重连
         setTimeout(function() {
           detectServerWithTimeout(5000).then(function(ok) {
             if (ok && state.roomCode) {
               updateSyncStatus("syncing");
               apiCall("/rooms/" + state.roomCode).then(function(d) {
                 state.roomName = d.room.name; state.members = d.room.members; state.rawItems = {};
-                (d.room.items || []).forEach(function(i) { state.rawItems[i.id] = i; });
+                (d.room.items || []).forEach(function(i) { i.expiryDate = i.expiryDate || i.expiry_date || ""; state.rawItems[i.id] = i; });
                 state._synced = true; state._renderHash = ""; persistLocal(); renderAll(); updateSyncStatus("online"); startPolling();
               }).catch(function() { updateSyncStatus("offline"); if (!state._pollTimer) startPolling(); });
             }
@@ -727,7 +1071,6 @@ document.addEventListener("click", function(e) {
         }, 2000);
       }
     }).catch(function() {
-      // Total failure — try local
       if (loadLocal() && state.roomCode) {
         loadingMsg.textContent = "服务器连接失败，使用本地数据...";
         enterMain(); hideLoading();
@@ -737,7 +1080,6 @@ document.addEventListener("click", function(e) {
     });
   }
 
-  // Expose retry for button
   window.retryAutoLogin = function() {
     loadingRetry.classList.remove("show");
     loadingMsg.textContent = "重新连接中...";
