@@ -252,6 +252,145 @@ function loadLocal() {
   } catch(e) { return false; }
 }
 
+// ── Saved Rooms (我的冰箱) ─────────────────────────────────────
+function getSavedRooms() {
+  try { return JSON.parse(localStorage.getItem("saved_rooms") || "[]"); }
+  catch(e) { return []; }
+}
+
+function saveRoomInfo(code, name, userName) {
+  var rooms = getSavedRooms();
+  // 去重 + 更新时间
+  rooms = rooms.filter(function(r) { return r.code !== code; });
+  rooms.unshift({ code: code, name: name, userName: userName, joinedAt: Date.now() });
+  // 最多保留 20 个
+  if (rooms.length > 20) rooms = rooms.slice(0, 20);
+  try { localStorage.setItem("saved_rooms", JSON.stringify(rooms)); } catch(e) {}
+  renderSavedRooms();
+}
+
+function renderSavedRooms() {
+  var list = document.getElementById("myRoomsList");
+  var rooms = getSavedRooms();
+  if (rooms.length === 0) {
+    list.innerHTML = '<div class="my-rooms-empty">还没有加入过冰箱<br>创建或加入后这里会显示</div>';
+    return;
+  }
+  var html = "";
+  rooms.forEach(function(r) {
+    html += '<div class="room-card" onclick="enterSavedRoom(\'' + r.code + '\',\'' + escapeHtml(r.name) + '\')">' +
+      '<div class="room-card-icon">🧊</div>' +
+      '<div class="room-card-info"><div class="room-card-name">' + escapeHtml(r.name) + '</div>' +
+      '<div class="room-card-code">房间码 ' + r.code + '</div></div>' +
+      '<div class="room-card-arrow">›</div></div>';
+  });
+  list.innerHTML = html;
+}
+
+function enterSavedRoom(code, name) {
+  if (!HAS_SERVER) {
+    showToast("正在连接服务器...");
+    return;
+  }
+  document.getElementById("loadingOverlay").classList.remove("hidden");
+  document.getElementById("loadingOverlay").style.display = "";
+  document.getElementById("loadingMsg").textContent = "正在进入 " + name + "...";
+
+  // 先用 GET 获取房间信息，然后自动加入（需要昵称）
+  apiCall("/rooms/" + code).then(function(d) {
+    // 用本地存的 userName 或从 saved_rooms 里找
+    var rooms = getSavedRooms();
+    var saved = rooms.find(function(r) { return r.code === code; });
+    var user = (saved && saved.userName) || "";
+
+    if (user) {
+      // 直接用保存的昵称加入
+      apiCall("/rooms/" + code + "/join", { method: "POST", body: { userName: user } })
+        .then(function(d2) {
+          state.roomCode = code; state.memberId = d2.memberId; state.userName = user;
+          state.roomName = d.room.name; state.members = d2.room.members; state.rawItems = {};
+          (d2.room.items || []).forEach(function(i) { i.expiryDate = i.expiryDate || i.expiry_date || ""; state.rawItems[i.id] = i; });
+          state._synced = true; persistLocal(); saveRoomInfo(code, d.room.name, user);
+          enterMain(); startPolling(); hideLoadingOverlay();
+        }).catch(function(e) {
+          hideLoadingOverlay();
+          showToast("加入失败：" + (e.error || e.message));
+        });
+    } else {
+      // 没有保存昵称，弹出输入框
+      hideLoadingOverlay();
+      var wrap = document.getElementById("joinUserWrap");
+      wrap.classList.remove("hidden");
+      wrap._joinCode = code; wrap._roomData = d.room;
+      document.getElementById("joinUser").focus();
+    }
+  }).catch(function() {
+    hideLoadingOverlay();
+    showToast("冰箱不存在，可能已被删除");
+  });
+}
+
+function hideLoadingOverlay() {
+  var el = document.getElementById("loadingOverlay");
+  el.classList.add("hidden");
+  setTimeout(function() { el.style.display = "none"; }, 400);
+}
+
+function showFindRooms() {
+  var wrap = document.getElementById("findRoomsWrap");
+  wrap.classList.toggle("hidden");
+  if (!wrap.classList.contains("hidden")) {
+    document.getElementById("findNickname").focus();
+  }
+}
+
+function findMyRooms() {
+  var nickname = document.getElementById("findNickname").value.trim();
+  if (!nickname) { showToast("请输入你的昵称"); return; }
+  if (!HAS_SERVER) { showToast("服务器连接中，请稍后再试"); return; }
+
+  var list = document.getElementById("myRoomsList");
+  list.innerHTML = '<div class="my-rooms-empty">正在查找...</div>';
+
+  apiCall("/user/" + encodeURIComponent(nickname) + "/rooms").then(function(d) {
+    if (!d.rooms || d.rooms.length === 0) {
+      list.innerHTML = '<div class="my-rooms-empty">没有找到"<b>' + escapeHtml(nickname) + '</b>"的冰箱<br>请确认昵称是否正确</div>';
+      return;
+    }
+    var html = "";
+    d.rooms.forEach(function(r) {
+      html += '<div class="room-card" onclick="findRoomAndJoin(\'' + r.code + '\',\'' + escapeHtml(r.name) + '\',\'' + escapeHtml(nickname) + '\')">' +
+        '<div class="room-card-icon">🧊</div>' +
+        '<div class="room-card-info"><div class="room-card-name">' + escapeHtml(r.name) + '</div>' +
+        '<div class="room-card-code">房间码 ' + r.code + '</div></div>' +
+        '<div class="room-card-arrow">›</div></div>';
+    });
+    list.innerHTML = html;
+    showToast("找到 " + d.rooms.length + " 个冰箱，点击加入");
+  }).catch(function(e) {
+    list.innerHTML = '<div class="my-rooms-empty">查找失败，请检查网络后重试</div>';
+    showToast("查找失败：" + (e.error || e.message));
+  });
+}
+
+function findRoomAndJoin(code, name, nickname) {
+  document.getElementById("loadingOverlay").classList.remove("hidden");
+  document.getElementById("loadingOverlay").style.display = "";
+  document.getElementById("loadingMsg").textContent = "正在进入 " + name + "...";
+
+  apiCall("/rooms/" + code + "/join", { method: "POST", body: { userName: nickname } })
+    .then(function(d) {
+      state.roomCode = code; state.memberId = d.memberId; state.userName = nickname;
+      state.roomName = d.room.name; state.members = d.room.members; state.rawItems = {};
+      (d.room.items || []).forEach(function(i) { i.expiryDate = i.expiryDate || i.expiry_date || ""; state.rawItems[i.id] = i; });
+      state._synced = true; persistLocal(); saveRoomInfo(code, d.room.name, nickname);
+      enterMain(); startPolling(); hideLoadingOverlay();
+    }).catch(function(e) {
+      hideLoadingOverlay();
+      showToast("加入失败：" + (e.error || e.message));
+    });
+}
+
 // ── Room Ops ───────────────────────────────────────────────────
 function showCreateForm() {
   document.getElementById("createForm").classList.remove("hidden");
@@ -268,7 +407,7 @@ function createRoom() {
       .then(function(d) {
         state.roomCode = d.roomCode; state.memberId = d.memberId; state.userName = user;
         state.roomName = name; state.rawItems = {}; state.members = d.room.members; state._synced = true;
-        persistLocal(); enterMain(); startPolling(); showToast("冰箱创建成功！");
+        persistLocal(); saveRoomInfo(d.roomCode, name, user); enterMain(); startPolling(); showToast("冰箱创建成功！");
       }).catch(function(e) { showToast("创建失败：" + (e.error || e.message)); });
   } else {
     state.roomCode = genRoomCode(); state.memberId = genId(8); state.userName = user;
@@ -310,7 +449,7 @@ function confirmJoin() {
         state.roomCode = code; state.memberId = d.memberId; state.userName = user;
         state.roomName = d.room.name; state.members = d.room.members; state.rawItems = {};
         (d.room.items || []).forEach(function(i) { i.expiryDate = i.expiryDate || i.expiry_date || ""; state.rawItems[i.id] = i; });
-        state._synced = true; persistLocal(); enterMain(); startPolling(); showToast("已加入");
+        state._synced = true; persistLocal(); saveRoomInfo(code, d.room.name, user); enterMain(); startPolling(); showToast("已加入");
       }).catch(function(e) { showToast("加入失败：" + (e.error || e.message)); });
   } else {
     var shared = wrap._shared;
@@ -989,6 +1128,8 @@ function voiceDoDelete(id, name) {
       setTimeout(function() {
         if (loadingEl.classList.contains("hidden")) loadingEl.style.display = "none";
       }, 400);
+      // 渲染本地已保存的冰箱列表
+      renderSavedRooms();
     }
   }
 

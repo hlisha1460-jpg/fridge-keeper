@@ -43,6 +43,18 @@
       <button class="btn-primary" onclick="confirmJoin()">确认加入</button>
     </div>
     <p class="footnote">创建冰箱 → 分享房间码 → 一家人一起管理</p>
+    <!-- 我的冰箱 -->
+    <div class="my-rooms" id="myRooms">
+      <div class="my-rooms-header">
+        <span>📋 我的冰箱</span>
+        <button class="link-btn" id="findRoomsBtn" onclick="showFindRooms()">🔍 找我的冰箱</button>
+      </div>
+      <div class="my-rooms-list" id="myRoomsList"></div>
+      <div class="find-rooms-wrap hidden" id="findRoomsWrap">
+        <input type="text" id="findNickname" placeholder="输入你的昵称查找冰箱" maxlength="10">
+        <button class="btn-secondary" onclick="findMyRooms()">查找</button>
+      </div>
+    </div>
   </div>
 
   <!-- 主界面 -->

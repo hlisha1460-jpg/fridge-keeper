@@ -208,6 +208,89 @@ button {
   letter-spacing: 1px;
 }
 
+/* ── 我的冰箱 ── */
+.my-rooms {
+  margin-top: 28px;
+  padding: 16px;
+  background: #fff;
+  border-radius: var(--radius);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+  text-align: left;
+}
+.my-rooms-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--primary);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.link-btn:active { opacity: 0.7; }
+
+.my-rooms-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.room-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--bg);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.room-card:active { background: #e8f5e9; }
+.room-card-icon { font-size: 28px; flex-shrink: 0; }
+.room-card-info { flex: 1; min-width: 0; }
+.room-card-name {
+  font-size: 15px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.room-card-code { font-size: 11px; color: var(--text-light); margin-top: 2px; }
+.room-card-arrow { font-size: 14px; color: var(--text-light); flex-shrink: 0; }
+
+.my-rooms-empty {
+  text-align: center;
+  padding: 16px 0;
+  font-size: 13px;
+  color: var(--text-light);
+  line-height: 1.6;
+}
+
+.find-rooms-wrap {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.find-rooms-wrap input {
+  flex: 1;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+  text-align: left;
+}
+.find-rooms-wrap input:focus { border-color: var(--primary); }
+.find-rooms-wrap .btn-secondary {
+  flex-shrink: 0;
+  padding: 10px 16px;
+  font-size: 14px;
+}
+
 /* ===== Buttons ===== */
 .btn-primary {
   width: 100%;

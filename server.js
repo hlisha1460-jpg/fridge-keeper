@@ -299,6 +299,45 @@ app.post("/api/rooms/:code/join", async (req, res) => {
       members: room.members, items: Object.values(room.items) } });
 });
 
+// ── API: Find rooms by nickname (免房间码加入) ────────────────────────
+app.get("/api/user/:nickname/rooms", async (req, res) => {
+  const { nickname } = req.params;
+  if (!nickname || nickname.length < 1) return res.status(400).json({ error: "请输入昵称" });
+
+  if (storageMode === "supabase") {
+    try {
+      // 拉取所有房间（用户量不大时可行），在服务端按昵称过滤
+      const allRooms = await supabaseFetch("GET", "fridge_rooms", {
+        select: "code,name,members,updated_at",
+        filter: "order=updated_at.desc&limit=100",
+      });
+      if (!allRooms || allRooms.length === 0) return res.json({ ok: true, rooms: [] });
+
+      const matched = [];
+      const lowerNick = nickname.toLowerCase();
+      for (const r of allRooms) {
+        const members = Array.isArray(r.members) ? r.members : [];
+        if (members.some(function(m) { return (m.name || "").toLowerCase() === lowerNick; })) {
+          matched.push({ code: r.code, name: r.name || "" });
+        }
+      }
+      return res.json({ ok: true, rooms: matched });
+    } catch (e) {
+      return res.status(500).json({ error: "查询失败：" + e.message });
+    }
+  }
+
+  // File fallback
+  const db = global._fileDB;
+  const matched = [];
+  Object.values(db.rooms || {}).forEach(function(r) {
+    if ((r.members || []).some(function(m) { return (m.name || "").toLowerCase() === nickname.toLowerCase(); })) {
+      matched.push({ code: r.code, name: r.name });
+    }
+  });
+  res.json({ ok: true, rooms: matched });
+});
+
 // ── API: Remove Member ────────────────────────────────────────────────
 app.post("/api/rooms/:code/remove-member", async (req, res) => {
   const { code } = req.params;
