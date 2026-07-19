@@ -863,12 +863,12 @@ document.addEventListener("click", function(e) {
 // ── Voice Input (语音放入/取出) ───────────────────────────────
 var _voiceRec = null;
 var _voiceActive = false;
+var _voiceErrored = false;  // 防止 onerror 后 onend 又弹消息
 
 function startVoiceInput() {
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
-    showToast("当前浏览器不支持语音识别");
-    // 降级：打开添加弹窗
+    showToast("当前浏览器不支持语音识别，请手动输入");
     openAddModal();
     return;
   }
@@ -883,6 +883,7 @@ function startVoiceInput() {
   _voiceRec.continuous = false;
   _voiceRec.interimResults = true;
   _voiceActive = true;
+  _voiceErrored = false;
 
   var overlay = document.getElementById("voiceOverlay");
   var hint = document.getElementById("voiceHint");
@@ -913,14 +914,45 @@ function startVoiceInput() {
   };
 
   _voiceRec.onerror = function(event) {
-    hint.textContent = "语音识别出错：" + (event.error || "未知错误");
-    if (event.error === "not-allowed") {
-      hint.innerHTML = "请允许浏览器使用麦克风<br>在微信中可能需要用系统浏览器打开";
+    _voiceErrored = true;
+    var err = event.error || "";
+    var msg;
+
+    if (err === "not-allowed") {
+      msg = "麦克风权限被拒绝<br>请在浏览器设置中允许麦克风<br>或点击下方\"手动输入\"";
+    } else if (err === "network" || err === "service-not-allowed") {
+      msg = "语音服务无法连接<br>（网络限制，国内常见）<br>请点下方\"手动输入\"添加食材";
+    } else if (err === "no-speech") {
+      msg = "没有听到声音<br>请再试一次，或手动输入";
+    } else if (err === "audio-capture") {
+      msg = "未检测到麦克风设备<br>请确认手机已开启麦克风权限";
+    } else if (err === "aborted") {
+      // 用户主动取消，不显示错误
+      stopVoiceInput();
+      return;
+    } else {
+      msg = "语音出错：" + (err || "未知错误") + "<br>请点下方\"手动输入\"添加食材";
     }
-    setTimeout(stopVoiceInput, 2000);
+
+    hint.innerHTML = msg;
+    hint.style.color = "#e74c3c";
+    result.textContent = "";
+
+    // 2 秒后自动降级：关闭浮层并打开添加弹窗
+    setTimeout(function() {
+      hint.style.color = "";
+      stopVoiceInput();
+      openAddModal();
+    }, 2500);
   };
 
   _voiceRec.onend = function() {
+    // onerror 已处理过，避免重复消息
+    if (_voiceErrored) {
+      _voiceActive = false;
+      _voiceRec = null;
+      return;
+    }
     if (_voiceActive && !finalTranscript) {
       hint.textContent = "没有听到声音，请再试一次";
       setTimeout(stopVoiceInput, 1500);
@@ -932,9 +964,15 @@ function startVoiceInput() {
   try {
     _voiceRec.start();
   } catch(e) {
-    showToast("启动语音失败");
+    showToast("启动语音失败，请手动输入");
     stopVoiceInput();
+    openAddModal();
   }
+}
+
+function voiceManualAdd() {
+  stopVoiceInput();
+  openAddModal();
 }
 
 function stopVoiceInput() {
@@ -945,8 +983,8 @@ function stopVoiceInput() {
   }
   var overlay = document.getElementById("voiceOverlay");
   var fab = document.querySelector(".voice-fab");
-  overlay.classList.remove("active");
-  fab.classList.remove("listening");
+  if (overlay) overlay.classList.remove("active");
+  if (fab) fab.classList.remove("listening");
 }
 
 // 关键词匹配 — 放入/取出
